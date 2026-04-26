@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>My Reps This Week</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🏛️</text></svg>">
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gradient-to-br from-blue-50 to-indigo-100 min-h-screen">
+    <div class="container mx-auto px-4 py-8 max-w-4xl">
+        <div class="text-center mb-8">
+            <h1 class="text-3xl font-bold mb-2">🏛️ My Reps This Week</h1>
+            <p class="text-gray-600 text-sm">See how your senators and House rep have been voting.</p>
+        </div>
+
+        <div id="addressSection" class="bg-white rounded-xl shadow-lg p-6 mb-6">
+            <h2 class="text-2xl font-bold text-gray-800 mb-4">Enter Your Address</h2>
+            <div class="space-y-4">
+                <input
+                    type="text"
+                    id="addressInput"
+                    placeholder="123 Main St, City, State ZIP"
+                    class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                />
+                <button
+                    onclick="findReps()"
+                    class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 px-6 rounded-lg transition-colors"
+                >
+                    Find My Reps
+                </button>
+            </div>
+            <div id="error" class="mt-4 p-4 bg-red-50 border border-red-200 text-red-700 rounded-lg hidden"></div>
+            <div id="loading" class="mt-4 text-center text-gray-600 hidden">
+                <div class="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600"></div>
+                <p class="mt-2">Looking up your district...</p>
+            </div>
+        </div>
+
+        <div id="results" class="hidden">
+            <div id="addressBar" class="bg-white rounded-xl shadow p-4 mb-6 text-sm text-gray-600 flex justify-between items-center">
+                <span id="addressBarText"></span>
+                <button onclick="resetForm()" class="text-indigo-600 hover:underline">change address</button>
+            </div>
+            <div id="cards" class="space-y-6"></div>
+        </div>
+
+        <a href="https://buymeacoffee.com/samiprehn" target="_blank" rel="noopener noreferrer" class="block text-center mt-8 mb-4 text-gray-400 text-sm hover:text-gray-600 transition-colors" style="text-decoration: none;">
+            Keep this page running
+        </a>
+    </div>
+
+    <script>
+        const STORAGE_KEY = 'my_reps_address';
+
+        // Caches (pattern from ready-set-vote)
+        const govTrackRoleCache = {};
+        const voteCache = {};
+
+        // Person ID extraction quirk from ready-set-vote: link not id
+        const personIdFromLink = (link) => link.split('/').filter(Boolean).pop();
+
+        async function geocodeAddress(address) {
+            const url = `https://geocoding.geo.census.gov/geocoder/geographies/onelineaddress?address=${encodeURIComponent(address)}&benchmark=Public_AR_Current&vintage=Current_Current&layers=all&format=json`;
+            const r = await fetch(url);
+            if (!r.ok) throw new Error('Address lookup failed');
+            const data = await r.json();
+            const match = data.result?.addressMatches?.[0];
+            if (!match) throw new Error('Could not find that address. Check spelling and include city, state, and ZIP.');
+
+            const geo = match.geographies;
+            // Find congressional district by regex match — layer name varies by Congress (119th, 120th, ...)
+            const cdKey = Object.keys(geo).find(k => /Congressional District/i.test(k));
+            if (!cdKey || !geo[cdKey]?.[0]) throw new Error('No congressional district found for that address.');
+            const cd = geo[cdKey][0];
+            const stateObj = geo.States?.[0];
+            if (!stateObj) throw new Error('Could not determine state.');
+
+            return {
+                state: stateObj.STUSAB,
+                stateName: stateObj.NAME,
+                district: parseInt(cd.BASENAME, 10),
+                matchedAddress: match.matchedAddress
+            };
+        }
+
+        async function fetchRoles(params) {
+            const key = JSON.stringify(params);
+            if (govTrackRoleCache[key]) return govTrackRoleCache[key];
+            const qs = new URLSearchParams({ current: 'true', ...params }).toString();
+            const r = await fetch(`https://www.govtrack.us/api/v2/role?${qs}`);
+            if (!r.ok) throw new Error('GovTrack role lookup failed');
+            const data = await r.json();
+            govTrackRoleCache[key] = data.objects || [];
+            return govTrackRoleCache[key];
+        }
+
+        async function fetchVotes(personId) {
+            if (voteCache[personId]) return voteCache[personId];
+            const r = await fetch(`https://www.govtrack.us/api/v2/vote_voter?person=${personId}&limit=20&order_by=-created`);
+            if (!r.ok) return [];
+            const data = await r.json();
+            voteCache[personId] = data.objects || [];
+            return voteCache[personId];
+        }
+
+        async function findReps() {
+            const address = document.getElementById('addressInput').value.trim();
+            if (!address) return showError('Please enter your address');
+
+            hideError();
+            document.getElementById('loading').classList.remove('hidden');
+
+            try {
+                const loc = await geocodeAddress(address);
+                localStorage.setItem(STORAGE_KEY, address);
+
+                const [senators, houseReps] = await Promise.all([
+                    fetchRoles({ state: loc.state, role_type: 'senator' }),
+                    fetchRoles({ state: loc.state, district: loc.district })
+                ]);
+
+                const reps = [...senators, ...houseReps];
+                if (reps.length === 0) throw new Error('No current representatives found.');
+
+                document.getElementById('loading').classList.add('hidden');
+                document.getElementById('addressSection').classList.add('hidden');
+                document.getElementById('results').classList.remove('hidden');
+                document.getElementById('addressBarText').textContent = `${loc.matchedAddress} · ${loc.stateName} District ${loc.district}`;
+
+                renderCards(reps);
+            } catch (err) {
+                document.getElementById('loading').classList.add('hidden');
+                showError(err.message);
+            }
+        }
+
+        function renderCards(reps) {
+            const container = document.getElementById('cards');
+            container.innerHTML = '';
+
+            reps.forEach(role => {
+                const personId = personIdFromLink(role.person.link);
+                const photoUrl = `https://www.govtrack.us/data/photos/${personId}-100px.jpeg`;
+                const partyColor = role.party === 'Democrat' ? 'text-blue-600' : role.party === 'Republican' ? 'text-red-600' : 'text-gray-600';
+                const subtitle = role.role_type === 'senator'
+                    ? `Senator · ${role.state}`
+                    : `Representative · ${role.state}-${role.district}`;
+
+                const card = document.createElement('div');
+                card.className = 'bg-white rounded-xl shadow-lg p-6';
+                card.innerHTML = `
+                    <div class="flex items-center gap-4 mb-4">
+                        <img src="${photoUrl}" alt="${role.person.firstname} ${role.person.lastname}" class="w-16 h-16 rounded-full object-cover bg-gray-200" onerror="this.style.display='none'">
+                        <div>
+                            <h3 class="text-xl font-bold text-gray-800">${role.person.firstname} ${role.person.lastname}</h3>
+                            <p class="text-sm ${partyColor}">${role.party} · ${subtitle}</p>
+                        </div>
+                    </div>
+                    <div class="votes text-sm text-gray-600">Loading recent votes…</div>
+                `;
+                container.appendChild(card);
+
+                fetchVotes(personId).then(votes => {
+                    const votesDiv = card.querySelector('.votes');
+                    if (votes.length === 0) {
+                        votesDiv.innerHTML = '<p class="text-gray-500 italic">No recent votes recorded.</p>';
+                        return;
+                    }
+                    votesDiv.innerHTML = `
+                        <h4 class="font-semibold text-gray-700 mb-2">Recent votes</h4>
+                        <ul class="space-y-2">
+                            ${votes.map(v => {
+                                const date = new Date(v.created).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+                                const opt = v.option?.value || '—';
+                                const optColor = opt === 'Yea' || opt === 'Aye' ? 'text-green-700 bg-green-50'
+                                    : opt === 'Nay' || opt === 'No' ? 'text-red-700 bg-red-50'
+                                    : 'text-gray-600 bg-gray-100';
+                                const question = v.vote?.question || 'Vote';
+                                const link = v.vote?.link || '#';
+                                return `
+                                    <li class="border-b border-gray-100 last:border-b-0 pb-2 last:pb-0 flex gap-3 items-start">
+                                        <span class="text-xs text-gray-400 whitespace-nowrap mt-0.5 w-20 flex-shrink-0">${date}</span>
+                                        <span class="flex-1"><a href="${link}" target="_blank" rel="noopener noreferrer" class="text-gray-800 hover:underline">${question}</a></span>
+                                        <span class="text-xs font-semibold px-2 py-0.5 rounded ${optColor} whitespace-nowrap">${opt}</span>
+                                    </li>
+                                `;
+                            }).join('')}
+                        </ul>
+                    `;
+                }).catch(() => {
+                    card.querySelector('.votes').innerHTML = '<p class="text-gray-500 italic">Could not load votes.</p>';
+                });
+            });
+        }
+
+        function showError(msg) {
+            const el = document.getElementById('error');
+            el.textContent = msg;
+            el.classList.remove('hidden');
+        }
+        function hideError() { document.getElementById('error').classList.add('hidden'); }
+
+        function resetForm() {
+            document.getElementById('results').classList.add('hidden');
+            document.getElementById('addressSection').classList.remove('hidden');
+            document.getElementById('cards').innerHTML = '';
+            hideError();
+        }
+
+        document.getElementById('addressInput').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') findReps();
+        });
+
+        // Auto-load on visit if we have a saved address
+        const saved = localStorage.getItem(STORAGE_KEY);
+        if (saved) {
+            document.getElementById('addressInput').value = saved;
+            findReps();
+        }
+    </script>
+</body>
+</html>
