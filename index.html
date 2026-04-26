@@ -3,33 +3,35 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>My Reps This Week</title>
+    <title>My Reps</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🏛️</text></svg>">
     <script src="https://cdn.tailwindcss.com"></script>
 </head>
 <body class="bg-gradient-to-br from-blue-50 to-indigo-100 min-h-screen">
     <div class="container mx-auto px-4 py-8 max-w-4xl">
         <div class="text-center mb-8">
-            <h1 class="text-3xl font-bold mb-2">🏛️ My Reps This Week</h1>
+            <h1 class="text-3xl font-bold mb-2">🏛️ My Reps</h1>
             <p class="text-gray-600 text-sm">See how your senators and House rep have been voting.</p>
         </div>
 
         <div id="addressSection" class="bg-white rounded-xl shadow-lg p-6 mb-6">
             <h2 class="text-2xl font-bold text-gray-800 mb-4">Enter Your Address</h2>
-            <div class="space-y-4">
-                <input
-                    type="text"
-                    id="addressInput"
-                    placeholder="123 Main St, City, State ZIP"
-                    class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
-                />
-                <button
-                    onclick="findReps()"
-                    class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 px-6 rounded-lg transition-colors"
-                >
+            <form id="addressForm" class="space-y-3" onsubmit="event.preventDefault(); findReps();">
+                <input type="text" id="street" name="street" autocomplete="address-line1" placeholder="Street address" required
+                    class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent" />
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <input type="text" id="city" name="city" autocomplete="address-level2" placeholder="City" required
+                        class="px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent" />
+                    <input type="text" id="state" name="state" autocomplete="address-level1" placeholder="State" required maxlength="2"
+                        class="px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent uppercase" />
+                    <input type="text" id="zip" name="zip" autocomplete="postal-code" placeholder="ZIP" required inputmode="numeric"
+                        class="px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent" />
+                </div>
+                <button type="submit"
+                    class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 px-6 rounded-lg transition-colors">
                     Find My Reps
                 </button>
-            </div>
+            </form>
             <div id="error" class="mt-4 p-4 bg-red-50 border border-red-200 text-red-700 rounded-lg hidden"></div>
             <div id="loading" class="mt-4 text-center text-gray-600 hidden">
                 <div class="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600"></div>
@@ -55,13 +57,15 @@
 
         // Caches (pattern from ready-set-vote)
         const govTrackRoleCache = {};
-        const voteCache = {};
+        const recordCache = {};
 
         // Person ID extraction quirk from ready-set-vote: link not id
         const personIdFromLink = (link) => link.split('/').filter(Boolean).pop();
 
         async function geocodeAddress(address) {
-            const url = `https://geocoding.geo.census.gov/geocoder/geographies/onelineaddress?address=${encodeURIComponent(address)}&benchmark=Public_AR_Current&vintage=Current_Current&layers=all&format=json`;
+            // Census Geocoder doesn't send CORS headers, route through corsproxy.io
+            const censusUrl = `https://geocoding.geo.census.gov/geocoder/geographies/onelineaddress?address=${encodeURIComponent(address)}&benchmark=Public_AR_Current&vintage=Current_Current&layers=all&format=json`;
+            const url = `https://corsproxy.io/?url=${encodeURIComponent(censusUrl)}`;
             const r = await fetch(url);
             if (!r.ok) throw new Error('Address lookup failed');
             const data = await r.json();
@@ -95,25 +99,56 @@
             return govTrackRoleCache[key];
         }
 
-        async function fetchVotes(personId) {
-            if (voteCache[personId]) return voteCache[personId];
-            const r = await fetch(`https://www.govtrack.us/api/v2/vote_voter?person=${personId}&limit=20&order_by=-created`);
-            if (!r.ok) return [];
-            const data = await r.json();
-            voteCache[personId] = data.objects || [];
-            return voteCache[personId];
+        async function fetchRecord(personId) {
+            if (recordCache[personId]) return recordCache[personId];
+            const j = (r) => r.ok ? r.json() : null;
+            const rolesData = await fetch(`https://www.govtrack.us/api/v2/role?person=${personId}&limit=50&order_by=startdate`).then(j);
+            const allRoles = rolesData?.objects || [];
+            const firstStart = allRoles.length > 0 ? allRoles[0].startdate : null;
+            const [personData, votesData, billsData, committeesData] = await Promise.all([
+                fetch(`https://www.govtrack.us/api/v2/person/${personId}`).then(j),
+                fetch(`https://www.govtrack.us/api/v2/vote_voter?person=${personId}&limit=20&order_by=-created`).then(j),
+                fetch(`https://www.govtrack.us/api/v2/bill?sponsor=${personId}&limit=1000&order_by=-introduced_date`).then(j),
+                fetch(`https://www.govtrack.us/api/v2/committee_member?person=${personId}`).then(j)
+            ]);
+            recordCache[personId] = {
+                bio: personData || {},
+                firstStart,
+                recentVotes: votesData?.objects || [],
+                billsSponsored: billsData?.objects || [],
+                committees: committeesData?.objects || []
+            };
+            return recordCache[personId];
+        }
+
+        const BILL_GROUPS = [
+            { label: 'Enacted', statuses: ['enacted_signed','enacted_veto_override','enacted_tendayrule'] },
+            { label: 'Passed Both Chambers', statuses: ['passed_bill','passed_concurrentres','passed_simpleres','passed_constamend','conference_passed_house','conference_passed_senate'] },
+            { label: 'Passed One Chamber', statuses: ['pass_over_house','pass_over_senate','failed_second_house','failed_second_senate'] },
+            { label: 'Passed Committee', statuses: ['reported'] },
+            { label: 'Introduced', statuses: ['introduced','referred','prov_kill_suspensionfailed','prov_kill_cloturefailed','vetoed_pocket','failed_originating_house','failed_originating_senate'] },
+        ];
+
+        function readAddress() {
+            const street = document.getElementById('street').value.trim();
+            const city = document.getElementById('city').value.trim();
+            const state = document.getElementById('state').value.trim();
+            const zip = document.getElementById('zip').value.trim();
+            if (!street || !city || !state || !zip) return null;
+            return { street, city, state, zip, full: `${street}, ${city}, ${state} ${zip}` };
         }
 
         async function findReps() {
-            const address = document.getElementById('addressInput').value.trim();
-            if (!address) return showError('Please enter your address');
+            const parts = readAddress();
+            if (!parts) return showError('Please fill in all address fields');
+            const address = parts.full;
 
             hideError();
             document.getElementById('loading').classList.remove('hidden');
 
             try {
                 const loc = await geocodeAddress(address);
-                localStorage.setItem(STORAGE_KEY, address);
+                localStorage.setItem(STORAGE_KEY, JSON.stringify(parts));
 
                 const [senators, houseReps] = await Promise.all([
                     fetchRoles({ state: loc.state, role_type: 'senator' }),
@@ -139,7 +174,7 @@
             const container = document.getElementById('cards');
             container.innerHTML = '';
 
-            reps.forEach(role => {
+            reps.forEach((role, idx) => {
                 const personId = personIdFromLink(role.person.link);
                 const photoUrl = `https://www.govtrack.us/data/photos/${personId}-100px.jpeg`;
                 const partyColor = role.party === 'Democrat' ? 'text-blue-600' : role.party === 'Republican' ? 'text-red-600' : 'text-gray-600';
@@ -152,44 +187,112 @@
                 card.innerHTML = `
                     <div class="flex items-center gap-4 mb-4">
                         <img src="${photoUrl}" alt="${role.person.firstname} ${role.person.lastname}" class="w-16 h-16 rounded-full object-cover bg-gray-200" onerror="this.style.display='none'">
-                        <div>
+                        <div class="flex-1">
                             <h3 class="text-xl font-bold text-gray-800">${role.person.firstname} ${role.person.lastname}</h3>
                             <p class="text-sm ${partyColor}">${role.party} · ${subtitle}</p>
+                            <div class="bio text-xs text-gray-500 mt-1"></div>
                         </div>
                     </div>
-                    <div class="votes text-sm text-gray-600">Loading recent votes…</div>
+                    <div class="record text-sm text-gray-600">Loading record…</div>
                 `;
                 container.appendChild(card);
 
-                fetchVotes(personId).then(votes => {
-                    const votesDiv = card.querySelector('.votes');
-                    if (votes.length === 0) {
-                        votesDiv.innerHTML = '<p class="text-gray-500 italic">No recent votes recorded.</p>';
-                        return;
+                fetchRecord(personId).then(r => {
+                    const bioDiv = card.querySelector('.bio');
+                    const recordDiv = card.querySelector('.record');
+
+                    const yearsInCongress = r.firstStart ? Math.floor((new Date() - new Date(r.firstStart)) / (365.25 * 24 * 60 * 60 * 1000)) : null;
+                    const age = r.bio.birthday ? Math.floor((new Date() - new Date(r.bio.birthday)) / (365.25 * 24 * 60 * 60 * 1000)) : null;
+                    const bioBits = [];
+                    if (age !== null) bioBits.push(`Age ${age}`);
+                    if (yearsInCongress !== null) bioBits.push(`${yearsInCongress} yr in Congress`);
+                    const links = [];
+                    if (r.bio.link) links.push(`<a href="${r.bio.link}" target="_blank" rel="noopener noreferrer" class="text-indigo-600 hover:underline">GovTrack</a>`);
+                    if (r.bio.osid) links.push(`<a href="https://www.opensecrets.org/members-of-congress/summary?cid=${r.bio.osid}" target="_blank" rel="noopener noreferrer" class="text-indigo-600 hover:underline">OpenSecrets</a>`);
+                    bioDiv.innerHTML = `${bioBits.join(' · ')}${links.length ? ' · ' + links.join(' · ') : ''}`;
+
+                    let html = '';
+
+                    // Committees
+                    if (r.committees.length > 0) {
+                        html += `<div class="mb-4">
+                            <h4 class="font-semibold text-gray-700 mb-1">Committees</h4>
+                            <ul class="list-disc list-inside text-gray-600 space-y-0.5">
+                                ${r.committees.map(cm => {
+                                    const role = cm.role_label && cm.role_label !== 'Member' ? ` <span class="text-gray-400">(${cm.role_label})</span>` : '';
+                                    return `<li>${cm.committee.name}${role}</li>`;
+                                }).join('')}
+                            </ul>
+                        </div>`;
                     }
-                    votesDiv.innerHTML = `
-                        <h4 class="font-semibold text-gray-700 mb-2">Recent votes</h4>
-                        <ul class="space-y-2">
-                            ${votes.map(v => {
-                                const date = new Date(v.created).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-                                const opt = v.option?.value || '—';
-                                const optColor = opt === 'Yea' || opt === 'Aye' ? 'text-green-700 bg-green-50'
-                                    : opt === 'Nay' || opt === 'No' ? 'text-red-700 bg-red-50'
-                                    : 'text-gray-600 bg-gray-100';
-                                const question = v.vote?.question || 'Vote';
-                                const link = v.vote?.link || '#';
-                                return `
-                                    <li class="border-b border-gray-100 last:border-b-0 pb-2 last:pb-0 flex gap-3 items-start">
-                                        <span class="text-xs text-gray-400 whitespace-nowrap mt-0.5 w-20 flex-shrink-0">${date}</span>
-                                        <span class="flex-1"><a href="${link}" target="_blank" rel="noopener noreferrer" class="text-gray-800 hover:underline">${question}</a></span>
-                                        <span class="text-xs font-semibold px-2 py-0.5 rounded ${optColor} whitespace-nowrap">${opt}</span>
-                                    </li>
-                                `;
-                            }).join('')}
-                        </ul>
-                    `;
+
+                    // Bills sponsored
+                    const remaining = new Set(r.billsSponsored.map(b => b.display_number));
+                    let billsDisplayed = 0;
+                    let billsHtml = '';
+                    BILL_GROUPS.forEach(group => {
+                        const bills = r.billsSponsored.filter(b => group.statuses.includes(b.current_status) && remaining.has(b.display_number));
+                        bills.forEach(b => remaining.delete(b.display_number));
+                        if (bills.length === 0) return;
+                        const isIntroduced = group.label === 'Introduced';
+                        const limit = isIntroduced ? Math.min(5, 20 - billsDisplayed) : 20 - billsDisplayed;
+                        const billsToShow = bills.slice(0, limit);
+                        if (billsToShow.length === 0) return;
+                        billsHtml += `<div class="mt-2">
+                            <div class="text-xs font-medium text-gray-500 uppercase tracking-wide">${group.label} <span class="text-gray-400 normal-case">(${bills.length})</span></div>
+                            <ul class="list-disc list-inside text-gray-600 space-y-0.5">
+                                ${billsToShow.map(bill => {
+                                    const title = bill.title_without_number || bill.title || 'Untitled';
+                                    const year = bill.introduced_date?.substring(0, 4);
+                                    const link = bill.link || '#';
+                                    const truncated = title.length > 100 ? title.substring(0, 100) + '…' : title;
+                                    return `<li><a href="${link}" target="_blank" rel="noopener noreferrer" class="hover:underline">${bill.display_number}: ${truncated}</a> <span class="text-gray-400">(${year})</span></li>`;
+                                }).join('')}
+                            </ul>
+                        </div>`;
+                        billsDisplayed += billsToShow.length;
+                    });
+                    if (billsHtml) {
+                        html += `<div class="mb-4">
+                            <h4 class="font-semibold text-gray-700 mb-1">Bills Sponsored <span class="text-xs font-normal text-gray-400">(${r.billsSponsored.length} total)</span></h4>
+                            ${billsHtml}
+                        </div>`;
+                    }
+
+                    // Recent votes
+                    if (r.recentVotes.length > 0) {
+                        html += `<div>
+                            <h4 class="font-semibold text-gray-700 mb-2">Recent Votes <span class="text-xs font-normal text-gray-400">(✓ with majority, ✗ with minority)</span></h4>
+                            <ul class="space-y-2">
+                                ${r.recentVotes.map(v => {
+                                    const date = new Date(v.created).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+                                    const opt = v.option?.value || '—';
+                                    const winner = v.option?.winner;
+                                    const winLabel = winner != null ? (winner ? ' ✓' : ' ✗') : '';
+                                    const optColor = (opt === 'Yea' || opt === 'Aye') ? 'text-green-700 bg-green-50'
+                                        : (opt === 'Nay' || opt === 'No') ? 'text-red-700 bg-red-50'
+                                        : 'text-gray-600 bg-gray-100';
+                                    const question = v.vote?.question || 'Vote';
+                                    const link = v.vote?.link || '#';
+                                    const passed = v.vote?.passed;
+                                    const yeas = v.vote?.total_plus;
+                                    const nays = v.vote?.total_minus;
+                                    const tally = (yeas != null && nays != null) ? ` <span class="text-gray-400 text-xs">(${passed ? 'Passed' : 'Failed'} ${yeas}–${nays})</span>` : '';
+                                    return `
+                                        <li class="border-b border-gray-100 last:border-b-0 pb-2 last:pb-0 flex gap-3 items-start">
+                                            <span class="text-xs text-gray-400 whitespace-nowrap mt-0.5 w-20 flex-shrink-0">${date}</span>
+                                            <span class="flex-1"><a href="${link}" target="_blank" rel="noopener noreferrer" class="text-gray-800 hover:underline">${question}</a>${tally}</span>
+                                            <span class="text-xs font-semibold px-2 py-0.5 rounded ${optColor} whitespace-nowrap">${opt}${winLabel}</span>
+                                        </li>
+                                    `;
+                                }).join('')}
+                            </ul>
+                        </div>`;
+                    }
+
+                    recordDiv.innerHTML = html || '<p class="text-gray-500 italic">No record available.</p>';
                 }).catch(() => {
-                    card.querySelector('.votes').innerHTML = '<p class="text-gray-500 italic">Could not load votes.</p>';
+                    card.querySelector('.record').innerHTML = '<p class="text-gray-500 italic">Could not load record.</p>';
                 });
             });
         }
@@ -208,15 +311,17 @@
             hideError();
         }
 
-        document.getElementById('addressInput').addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') findReps();
-        });
-
         // Auto-load on visit if we have a saved address
         const saved = localStorage.getItem(STORAGE_KEY);
         if (saved) {
-            document.getElementById('addressInput').value = saved;
-            findReps();
+            try {
+                const p = JSON.parse(saved);
+                document.getElementById('street').value = p.street || '';
+                document.getElementById('city').value = p.city || '';
+                document.getElementById('state').value = p.state || '';
+                document.getElementById('zip').value = p.zip || '';
+                findReps();
+            } catch (e) { /* old format, ignore */ }
         }
     </script>
 </body>
