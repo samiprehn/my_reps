@@ -64,10 +64,11 @@
         // Person ID extraction quirk from ready-set-vote: link not id
         const personIdFromLink = (link) => link.split('/').filter(Boolean).pop();
 
+        const GEOCODE_WORKER = 'https://my-reps.sami-prehn.workers.dev';
+
         async function geocodeAddress(address) {
-            // Census Geocoder doesn't send CORS headers, route through corsproxy.io
-            const censusUrl = `https://geocoding.geo.census.gov/geocoder/geographies/onelineaddress?address=${encodeURIComponent(address)}&benchmark=Public_AR_Current&vintage=Current_Current&layers=all&format=json`;
-            const url = `https://corsproxy.io/?url=${encodeURIComponent(censusUrl)}`;
+            // Census Geocoder doesn't send CORS headers, route through our Cloudflare Worker
+            const url = `${GEOCODE_WORKER}?address=${encodeURIComponent(address)}`;
             const r = await fetch(url);
             if (!r.ok) throw new Error('Address lookup failed');
             const data = await r.json();
@@ -82,10 +83,15 @@
             const stateObj = geo.States?.[0];
             if (!stateObj) throw new Error('Could not determine state.');
 
+            // At-large states (SD, ND, WY, VT, DE, AK) have BASENAME "(at Large)" → district 0.
+            // parseInt on that gives NaN, which GovTrack rejects with a 400.
+            const parsedDistrict = parseInt(cd.BASENAME, 10);
+            const district = Number.isNaN(parsedDistrict) ? 0 : parsedDistrict;
+
             return {
                 state: stateObj.STUSAB,
                 stateName: stateObj.NAME,
-                district: parseInt(cd.BASENAME, 10),
+                district,
                 matchedAddress: match.matchedAddress
             };
         }
