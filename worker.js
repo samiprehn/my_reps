@@ -13,13 +13,15 @@ const UPSTREAM = 'https://geocoding.geo.census.gov/geocoder/geographies/onelinea
 // clients; the Census API is free/keyless so the only risk is Worker quota.)
 const ALLOWED_ORIGINS = [
   'https://samiprehn.github.io',
-  'http://localhost',
-  'http://127.0.0.1',
+  /^http:\/\/localhost(:\d+)?$/,
+  /^http:\/\/127\.0\.0\.1(:\d+)?$/,
 ];
 
 function corsHeaders(request) {
   const origin = request.headers.get('Origin') || '';
-  const allowed = ALLOWED_ORIGINS.some((o) => origin.startsWith(o));
+  const allowed = ALLOWED_ORIGINS.some((o) =>
+    typeof o === 'string' ? origin === o : o.test(origin)
+  );
   return {
     'Access-Control-Allow-Origin': allowed ? origin : ALLOWED_ORIGINS[0],
     'Access-Control-Allow-Methods': 'GET, OPTIONS',
@@ -63,7 +65,7 @@ export default {
         status: upstream.status,
         headers: {
           'Content-Type': 'application/json',
-          'Cache-Control': 'public, max-age=86400',
+          'Cache-Control': upstream.ok ? 'public, max-age=86400' : 'no-store',
           ...cors,
         },
       });

@@ -64,6 +64,9 @@
         // Person ID extraction quirk from ready-set-vote: link not id
         const personIdFromLink = (link) => link.split('/').filter(Boolean).pop();
 
+        // Escape API strings before inserting into innerHTML
+        const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
         const GEOCODE_WORKER = 'https://my-reps.sami-prehn.workers.dev';
 
         async function geocodeAddress(address) {
@@ -194,9 +197,9 @@
                 card.className = 'bg-white rounded-xl shadow-lg p-6';
                 card.innerHTML = `
                     <div class="flex items-center gap-4 mb-4">
-                        <img src="${photoUrl}" alt="${role.person.firstname} ${role.person.lastname}" class="w-16 h-16 rounded-full object-cover bg-gray-200" onerror="this.style.display='none'">
+                        <img src="${photoUrl}" alt="${esc(role.person.firstname)} ${esc(role.person.lastname)}" class="w-16 h-16 rounded-full object-cover bg-gray-200" onerror="this.style.display='none'">
                         <div class="flex-1">
-                            <h3 class="text-xl font-bold text-gray-800">${role.person.firstname} ${role.person.lastname}</h3>
+                            <h3 class="text-xl font-bold text-gray-800">${esc(role.person.firstname)} ${esc(role.person.lastname)}</h3>
                             <p class="text-sm ${partyColor}">${role.party} · ${subtitle}</p>
                             <div class="bio text-xs text-gray-500 mt-1"></div>
                         </div>
@@ -227,8 +230,8 @@
                             <h4 class="font-semibold text-gray-700 mb-1">Committees</h4>
                             <ul class="list-disc list-inside text-gray-600 space-y-0.5">
                                 ${r.committees.map(cm => {
-                                    const role = cm.role_label && cm.role_label !== 'Member' ? ` <span class="text-gray-400">(${cm.role_label})</span>` : '';
-                                    return `<li>${cm.committee.name}${role}</li>`;
+                                    const role = cm.role_label && cm.role_label !== 'Member' ? ` <span class="text-gray-400">(${esc(cm.role_label)})</span>` : '';
+                                    return `<li>${esc(cm.committee.name)}${role}</li>`;
                                 }).join('')}
                             </ul>
                         </div>`;
@@ -254,7 +257,7 @@
                                     const year = bill.introduced_date?.substring(0, 4);
                                     const link = bill.link || '#';
                                     const truncated = title.length > 100 ? title.substring(0, 100) + '…' : title;
-                                    return `<li><a href="${link}" target="_blank" rel="noopener noreferrer" class="hover:underline">${bill.display_number}: ${truncated}</a> <span class="text-gray-400">(${year})</span></li>`;
+                                    return `<li><a href="${link}" target="_blank" rel="noopener noreferrer" class="hover:underline">${esc(bill.display_number)}: ${esc(truncated)}</a> <span class="text-gray-400">(${year})</span></li>`;
                                 }).join('')}
                             </ul>
                         </div>`;
@@ -289,7 +292,7 @@
                                     return `
                                         <li class="border-b border-gray-100 last:border-b-0 pb-2 last:pb-0 flex gap-3 items-start">
                                             <span class="text-xs text-gray-400 whitespace-nowrap mt-0.5 w-20 flex-shrink-0">${date}</span>
-                                            <span class="flex-1"><a href="${link}" target="_blank" rel="noopener noreferrer" class="text-gray-800 hover:underline">${question}</a>${tally}</span>
+                                            <span class="flex-1"><a href="${link}" target="_blank" rel="noopener noreferrer" class="text-gray-800 hover:underline">${esc(question)}</a>${tally}</span>
                                             <span class="text-xs font-semibold px-2 py-0.5 rounded ${optColor} whitespace-nowrap">${opt}${winLabel}</span>
                                         </li>
                                     `;
