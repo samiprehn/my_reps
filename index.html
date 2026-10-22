@@ -57,13 +57,6 @@
     <script>
         const STORAGE_KEY = 'my_reps_address';
 
-        // Caches (pattern from ready-set-vote)
-        const govTrackRoleCache = {};
-        const recordCache = {};
-
-        // Person ID extraction quirk from ready-set-vote: link not id
-        const personIdFromLink = (link) => link.split('/').filter(Boolean).pop();
-
         // Escape API strings before inserting into innerHTML
         const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
@@ -86,8 +79,8 @@
             const stateObj = geo.States?.[0];
             if (!stateObj) throw new Error('Could not determine state.');
 
-            // At-large states (SD, ND, WY, VT, DE, AK) have BASENAME "(at Large)" → district 0.
-            // parseInt on that gives NaN, which GovTrack rejects with a 400.
+            // At-large states (SD, ND, WY, VT, DE, AK) have BASENAME "(at Large)" → district 0,
+            // which is also how congress-legislators numbers at-large seats.
             const parsedDistrict = parseInt(cd.BASENAME, 10);
             const district = Number.isNaN(parsedDistrict) ? 0 : parsedDistrict;
 
@@ -99,46 +92,35 @@
             };
         }
 
-        async function fetchRoles(params) {
-            const key = JSON.stringify(params);
-            if (govTrackRoleCache[key]) return govTrackRoleCache[key];
-            const qs = new URLSearchParams({ current: 'true', ...params }).toString();
-            const r = await fetch(`https://www.govtrack.us/api/v2/role?${qs}`);
-            if (!r.ok) throw new Error('GovTrack role lookup failed');
-            const data = await r.json();
-            govTrackRoleCache[key] = data.objects || [];
-            return govTrackRoleCache[key];
+        // Congress data from the unitedstates/congress-legislators project (static JSON, CORS-enabled).
+        // GovTrack's API started serving Cloudflare challenges (Oct 2026), which browsers can't pass.
+        const CL = 'https://unitedstates.github.io/congress-legislators';
+        let congressData = null;
+        function loadCongressData() {
+            if (!congressData) {
+                const get = (f) => fetch(`${CL}/${f}`).then(r => { if (!r.ok) throw new Error('Could not load Congress data'); return r.json(); });
+                congressData = Promise.all([
+                    get('legislators-current.json'),
+                    get('committee-membership-current.json'),
+                    get('committees-current.json')
+                ]).then(([legislators, membership, committees]) => {
+                    const committeeNames = Object.fromEntries(committees.map(c => [c.thomas_id, c.name]));
+                    // Full committees only (subcommittee ids have a numeric suffix, e.g. SSAF13)
+                    const committeesByMember = {};
+                    for (const [id, members] of Object.entries(membership)) {
+                        if (!committeeNames[id]) continue;
+                        for (const m of members) {
+                            (committeesByMember[m.bioguide] ||= []).push({ name: committeeNames[id], title: m.title });
+                        }
+                    }
+                    return { legislators, committeesByMember };
+                });
+                congressData.catch(() => { congressData = null; });
+            }
+            return congressData;
         }
 
-        async function fetchRecord(personId) {
-            if (recordCache[personId]) return recordCache[personId];
-            const j = (r) => r.ok ? r.json() : null;
-            const rolesData = await fetch(`https://www.govtrack.us/api/v2/role?person=${personId}&limit=50&order_by=startdate`).then(j);
-            const allRoles = rolesData?.objects || [];
-            const firstStart = allRoles.length > 0 ? allRoles[0].startdate : null;
-            const [personData, votesData, billsData, committeesData] = await Promise.all([
-                fetch(`https://www.govtrack.us/api/v2/person/${personId}`).then(j),
-                fetch(`https://www.govtrack.us/api/v2/vote_voter?person=${personId}&limit=20&order_by=-created`).then(j),
-                fetch(`https://www.govtrack.us/api/v2/bill?sponsor=${personId}&limit=1000&order_by=-introduced_date`).then(j),
-                fetch(`https://www.govtrack.us/api/v2/committee_member?person=${personId}`).then(j)
-            ]);
-            recordCache[personId] = {
-                bio: personData || {},
-                firstStart,
-                recentVotes: votesData?.objects || [],
-                billsSponsored: billsData?.objects || [],
-                committees: committeesData?.objects || []
-            };
-            return recordCache[personId];
-        }
-
-        const BILL_GROUPS = [
-            { label: 'Enacted', statuses: ['enacted_signed','enacted_veto_override','enacted_tendayrule'] },
-            { label: 'Passed Both Chambers', statuses: ['passed_bill','passed_concurrentres','passed_simpleres','passed_constamend','conference_passed_house','conference_passed_senate'] },
-            { label: 'Passed One Chamber', statuses: ['pass_over_house','pass_over_senate','failed_second_house','failed_second_senate'] },
-            { label: 'Passed Committee', statuses: ['reported'] },
-            { label: 'Introduced', statuses: ['introduced','referred','prov_kill_suspensionfailed','prov_kill_cloturefailed','vetoed_pocket','failed_originating_house','failed_originating_senate'] },
-        ];
+        const currentTerm = (leg) => leg.terms[leg.terms.length - 1];
 
         function readAddress() {
             const street = document.getElementById('street').value.trim();
@@ -158,13 +140,12 @@
             document.getElementById('loading').classList.remove('hidden');
 
             try {
-                const loc = await geocodeAddress(address);
+                const [loc, data] = await Promise.all([geocodeAddress(address), loadCongressData()]);
                 localStorage.setItem(STORAGE_KEY, JSON.stringify(parts));
 
-                const [senators, houseReps] = await Promise.all([
-                    fetchRoles({ state: loc.state, role_type: 'senator' }),
-                    fetchRoles({ state: loc.state, district: loc.district })
-                ]);
+                const inState = data.legislators.filter(l => currentTerm(l).state === loc.state);
+                const senators = inState.filter(l => currentTerm(l).type === 'sen');
+                const houseReps = inState.filter(l => currentTerm(l).type === 'rep' && currentTerm(l).district === loc.district);
 
                 const reps = [...senators, ...houseReps];
                 if (reps.length === 0) throw new Error('No current representatives found.');
@@ -174,137 +155,62 @@
                 document.getElementById('results').classList.remove('hidden');
                 document.getElementById('addressBarText').textContent = `${loc.matchedAddress} · ${loc.stateName} District ${loc.district}`;
 
-                renderCards(reps);
+                renderCards(reps, data.committeesByMember);
             } catch (err) {
                 document.getElementById('loading').classList.add('hidden');
                 showError(err.message);
             }
         }
 
-        function renderCards(reps) {
+        function renderCards(reps, committeesByMember) {
             const container = document.getElementById('cards');
             container.innerHTML = '';
 
-            reps.forEach((role, idx) => {
-                const personId = personIdFromLink(role.person.link);
-                const photoUrl = `https://www.govtrack.us/data/photos/${personId}-100px.jpeg`;
-                const partyColor = role.party === 'Democrat' ? 'text-blue-600' : role.party === 'Republican' ? 'text-red-600' : 'text-gray-600';
-                const subtitle = role.role_type === 'senator'
-                    ? `Senator · ${role.state}`
-                    : `Representative · ${role.state}-${role.district}`;
+            const YEAR = 365.25 * 24 * 60 * 60 * 1000;
+            reps.forEach(leg => {
+                const term = currentTerm(leg);
+                const first = leg.name.nickname || leg.name.first;
+                const photoUrl = `https://unitedstates.github.io/images/congress/225x275/${leg.id.bioguide}.jpg`;
+                const partyColor = term.party === 'Democrat' ? 'text-blue-600' : term.party === 'Republican' ? 'text-red-600' : 'text-gray-600';
+                const subtitle = term.type === 'sen'
+                    ? `Senator · ${term.state}`
+                    : `Representative · ${term.state}-${term.district}`;
+
+                const firstStart = leg.terms[0].start;
+                const yearsInCongress = Math.floor((new Date() - new Date(firstStart)) / YEAR);
+                const age = leg.bio?.birthday ? Math.floor((new Date() - new Date(leg.bio.birthday)) / YEAR) : null;
+                const bioBits = [];
+                if (age !== null) bioBits.push(`Age ${age}`);
+                bioBits.push(`${yearsInCongress} yr in Congress`);
+                const linkCls = 'text-indigo-600 hover:underline';
+                if (leg.id.govtrack) bioBits.push(`<a href="https://www.govtrack.us/congress/members/${leg.id.govtrack}" target="_blank" rel="noopener noreferrer" class="${linkCls}">GovTrack</a>`);
+                if (leg.id.opensecrets) bioBits.push(`<a href="https://www.opensecrets.org/members-of-congress/summary?cid=${esc(leg.id.opensecrets)}" target="_blank" rel="noopener noreferrer" class="${linkCls}">OpenSecrets</a>`);
+
+                const committees = committeesByMember[leg.id.bioguide] || [];
+                const committeesHtml = committees.length === 0 ? '' : `<div class="mb-4">
+                        <h4 class="font-semibold text-gray-700 mb-1">Committees</h4>
+                        <ul class="list-disc list-inside text-gray-600 space-y-0.5">
+                            ${committees.map(cm => `<li>${esc(cm.name)}${cm.title ? ` <span class="text-gray-400">(${esc(cm.title)})</span>` : ''}</li>`).join('')}
+                        </ul>
+                    </div>`;
 
                 const card = document.createElement('div');
                 card.className = 'bg-white rounded-xl shadow-lg p-6';
                 card.innerHTML = `
                     <div class="flex items-center gap-4 mb-4">
-                        <img src="${photoUrl}" alt="${esc(role.person.firstname)} ${esc(role.person.lastname)}" class="w-16 h-16 rounded-full object-cover bg-gray-200" onerror="this.style.display='none'">
+                        <img src="${photoUrl}" alt="${esc(first)} ${esc(leg.name.last)}" class="w-16 h-16 rounded-full object-cover object-top bg-gray-200" onerror="this.style.display='none'">
                         <div class="flex-1">
-                            <h3 class="text-xl font-bold text-gray-800">${esc(role.person.firstname)} ${esc(role.person.lastname)}</h3>
-                            <p class="text-sm ${partyColor}">${role.party} · ${subtitle}</p>
-                            <div class="bio text-xs text-gray-500 mt-1"></div>
+                            <h3 class="text-xl font-bold text-gray-800">${esc(first)} ${esc(leg.name.last)}</h3>
+                            <p class="text-sm ${partyColor}">${esc(term.party)} · ${subtitle}</p>
+                            <div class="bio text-xs text-gray-500 mt-1">${bioBits.join(' · ')}</div>
                         </div>
                     </div>
-                    <div class="record text-sm text-gray-600">Loading record…</div>
+                    <div class="record text-sm text-gray-600">
+                        ${committeesHtml}
+                        <p class="text-gray-400 italic text-xs">Sponsored bills and recent votes are temporarily unavailable.</p>
+                    </div>
                 `;
                 container.appendChild(card);
-
-                fetchRecord(personId).then(r => {
-                    const bioDiv = card.querySelector('.bio');
-                    const recordDiv = card.querySelector('.record');
-
-                    const yearsInCongress = r.firstStart ? Math.floor((new Date() - new Date(r.firstStart)) / (365.25 * 24 * 60 * 60 * 1000)) : null;
-                    const age = r.bio.birthday ? Math.floor((new Date() - new Date(r.bio.birthday)) / (365.25 * 24 * 60 * 60 * 1000)) : null;
-                    const bioBits = [];
-                    if (age !== null) bioBits.push(`Age ${age}`);
-                    if (yearsInCongress !== null) bioBits.push(`${yearsInCongress} yr in Congress`);
-                    const links = [];
-                    if (r.bio.link) links.push(`<a href="${r.bio.link}" target="_blank" rel="noopener noreferrer" class="text-indigo-600 hover:underline">GovTrack</a>`);
-                    if (r.bio.osid) links.push(`<a href="https://www.opensecrets.org/members-of-congress/summary?cid=${r.bio.osid}" target="_blank" rel="noopener noreferrer" class="text-indigo-600 hover:underline">OpenSecrets</a>`);
-                    bioDiv.innerHTML = `${bioBits.join(' · ')}${links.length ? ' · ' + links.join(' · ') : ''}`;
-
-                    let html = '';
-
-                    // Committees
-                    if (r.committees.length > 0) {
-                        html += `<div class="mb-4">
-                            <h4 class="font-semibold text-gray-700 mb-1">Committees</h4>
-                            <ul class="list-disc list-inside text-gray-600 space-y-0.5">
-                                ${r.committees.map(cm => {
-                                    const role = cm.role_label && cm.role_label !== 'Member' ? ` <span class="text-gray-400">(${esc(cm.role_label)})</span>` : '';
-                                    return `<li>${esc(cm.committee.name)}${role}</li>`;
-                                }).join('')}
-                            </ul>
-                        </div>`;
-                    }
-
-                    // Bills sponsored
-                    const remaining = new Set(r.billsSponsored.map(b => b.display_number));
-                    let billsDisplayed = 0;
-                    let billsHtml = '';
-                    BILL_GROUPS.forEach(group => {
-                        const bills = r.billsSponsored.filter(b => group.statuses.includes(b.current_status) && remaining.has(b.display_number));
-                        bills.forEach(b => remaining.delete(b.display_number));
-                        if (bills.length === 0) return;
-                        const isIntroduced = group.label === 'Introduced';
-                        const limit = isIntroduced ? Math.min(5, 20 - billsDisplayed) : 20 - billsDisplayed;
-                        const billsToShow = bills.slice(0, limit);
-                        if (billsToShow.length === 0) return;
-                        billsHtml += `<div class="mt-2">
-                            <div class="text-xs font-medium text-gray-500 uppercase tracking-wide">${group.label} <span class="text-gray-400 normal-case">(${bills.length})</span></div>
-                            <ul class="list-disc list-inside text-gray-600 space-y-0.5">
-                                ${billsToShow.map(bill => {
-                                    const title = bill.title_without_number || bill.title || 'Untitled';
-                                    const year = bill.introduced_date?.substring(0, 4);
-                                    const link = bill.link || '#';
-                                    const truncated = title.length > 100 ? title.substring(0, 100) + '…' : title;
-                                    return `<li><a href="${link}" target="_blank" rel="noopener noreferrer" class="hover:underline">${esc(bill.display_number)}: ${esc(truncated)}</a> <span class="text-gray-400">(${year})</span></li>`;
-                                }).join('')}
-                            </ul>
-                        </div>`;
-                        billsDisplayed += billsToShow.length;
-                    });
-                    if (billsHtml) {
-                        html += `<div class="mb-4">
-                            <h4 class="font-semibold text-gray-700 mb-1">Bills Sponsored <span class="text-xs font-normal text-gray-400">(${r.billsSponsored.length} total)</span></h4>
-                            ${billsHtml}
-                        </div>`;
-                    }
-
-                    // Recent votes
-                    if (r.recentVotes.length > 0) {
-                        html += `<div>
-                            <h4 class="font-semibold text-gray-700 mb-2">Recent Votes <span class="text-xs font-normal text-gray-400">(✓ with majority, ✗ with minority)</span></h4>
-                            <ul class="space-y-2">
-                                ${r.recentVotes.map(v => {
-                                    const date = new Date(v.created).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-                                    const opt = v.option?.value || '—';
-                                    const winner = v.option?.winner;
-                                    const winLabel = winner != null ? (winner ? ' ✓' : ' ✗') : '';
-                                    const optColor = (opt === 'Yea' || opt === 'Aye') ? 'text-green-700 bg-green-50'
-                                        : (opt === 'Nay' || opt === 'No') ? 'text-red-700 bg-red-50'
-                                        : 'text-gray-600 bg-gray-100';
-                                    const question = v.vote?.question || 'Vote';
-                                    const link = v.vote?.link || '#';
-                                    const passed = v.vote?.passed;
-                                    const yeas = v.vote?.total_plus;
-                                    const nays = v.vote?.total_minus;
-                                    const tally = (yeas != null && nays != null) ? ` <span class="text-gray-400 text-xs">(${passed ? 'Passed' : 'Failed'} ${yeas}–${nays})</span>` : '';
-                                    return `
-                                        <li class="border-b border-gray-100 last:border-b-0 pb-2 last:pb-0 flex gap-3 items-start">
-                                            <span class="text-xs text-gray-400 whitespace-nowrap mt-0.5 w-20 flex-shrink-0">${date}</span>
-                                            <span class="flex-1"><a href="${link}" target="_blank" rel="noopener noreferrer" class="text-gray-800 hover:underline">${esc(question)}</a>${tally}</span>
-                                            <span class="text-xs font-semibold px-2 py-0.5 rounded ${optColor} whitespace-nowrap">${opt}${winLabel}</span>
-                                        </li>
-                                    `;
-                                }).join('')}
-                            </ul>
-                        </div>`;
-                    }
-
-                    recordDiv.innerHTML = html || '<p class="text-gray-500 italic">No record available.</p>';
-                }).catch(() => {
-                    card.querySelector('.record').innerHTML = '<p class="text-gray-500 italic">Could not load record.</p>';
-                });
             });
         }
 
