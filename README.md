@@ -15,7 +15,7 @@ Enter your address and you'll get a card for each of your three federal legislat
 Single-file HTML, fully client-side. No backend, no API keys.
 
 - **US Census Geocoder** — address → state + congressional district (routed through a Cloudflare Worker, `my-reps.sami-prehn.workers.dev`, since the Geocoder doesn't send CORS headers)
-- **congress-legislators** (unitedstates.github.io) — current members, committees, and photos as static JSON. (GovTrack's API started returning Cloudflare challenges in Oct 2026; sponsored bills and votes are disabled until they move to the Congress.gov API.)
+- **congress-legislators** (unitedstates.github.io) — current members, committees, and photos as static JSON. (GovTrack's API started returning Cloudflare challenges in Oct 2026; sponsored bills and recent votes come from the Worker's `/bills` and `/votes` routes (Congress.gov API + senate.gov XML; `CONGRESS_API_KEY` secret).)
 - **Tailwind via CDN** for styling
 - Address persists in `localStorage`; split into street/city/state/ZIP fields so browsers offer saved-address autofill
 

@@ -122,6 +122,91 @@
 
         const currentTerm = (leg) => leg.terms[leg.terms.length - 1];
 
+        // Sponsored bills + recent votes via our Worker (Congress.gov / senate.gov; key lives in the Worker)
+        const recordCache = {};
+        function fetchRecord(leg) {
+            const id = leg.id.bioguide;
+            if (!recordCache[id]) {
+                const j = (r) => r.ok ? r.json() : null;
+                const votesQs = currentTerm(leg).type === 'sen' ? `chamber=senate&lis=${leg.id.lis}` : `chamber=house&bioguide=${id}`;
+                recordCache[id] = Promise.all([
+                    fetch(`${GEOCODE_WORKER}/bills?bioguide=${id}`).then(j),
+                    fetch(`${GEOCODE_WORKER}/votes?${votesQs}`).then(j)
+                ]).then(([bills, votes]) => ({ bills, votes: votes?.votes || [] }));
+                recordCache[id].catch(() => { delete recordCache[id]; });
+            }
+            return recordCache[id];
+        }
+
+        // Congress.gov only gives each bill's latest action, so stage is inferred from its text
+        const BILL_GROUPS = [
+            { label: 'Enacted', test: /became (public|private) law|signed by president/i },
+            { label: 'Passed a Chamber', test: /passed (house|senate)|passed\/agreed to|agreed to in (house|senate)|resolution agreed to|presented to president|received in the (house|senate)|held at the desk|cleared for white house/i },
+            { label: 'Passed Committee', test: /reported|placed on (the )?(union|house|senate legislative) calendar/i },
+            { label: 'Introduced', test: /./ },
+        ];
+        const BILL_LABELS = { HR: 'H.R.', S: 'S.', HRES: 'H.Res.', SRES: 'S.Res.', HJRES: 'H.J.Res.', SJRES: 'S.J.Res.', HCONRES: 'H.Con.Res.', SCONRES: 'S.Con.Res.' };
+        const BILL_SLUGS = { HR: 'house-bill', S: 'senate-bill', HRES: 'house-resolution', SRES: 'senate-resolution', HJRES: 'house-joint-resolution', SJRES: 'senate-joint-resolution', HCONRES: 'house-concurrent-resolution', SCONRES: 'senate-concurrent-resolution' };
+        const ordinal = (n) => n + ([11, 12, 13].includes(n % 100) ? 'th' : ({ 1: 'st', 2: 'nd', 3: 'rd' }[n % 10] || 'th'));
+        const billUrl = (b) => `https://www.congress.gov/bill/${ordinal(b.congress)}-congress/${BILL_SLUGS[b.type] || 'house-bill'}/${b.number}`;
+
+        function renderRecord(r) {
+            let html = '';
+            const bills = r.bills?.bills || [];
+            let billsHtml = '';
+            let billsDisplayed = 0;
+            const remaining = new Set(bills);
+            BILL_GROUPS.forEach(group => {
+                const inGroup = bills.filter(b => remaining.has(b) && group.test.test(b.latestAction));
+                inGroup.forEach(b => remaining.delete(b));
+                const limit = group.label === 'Introduced' ? Math.min(5, 20 - billsDisplayed) : 20 - billsDisplayed;
+                const toShow = inGroup.slice(0, limit);
+                if (toShow.length === 0) return;
+                billsHtml += `<div class="mt-2">
+                    <div class="text-xs font-medium text-gray-500 uppercase tracking-wide">${group.label} <span class="text-gray-400 normal-case">(${inGroup.length})</span></div>
+                    <ul class="list-disc list-inside text-gray-600 space-y-0.5">
+                        ${toShow.map(b => {
+                            const title = b.title || 'Untitled';
+                            const truncated = title.length > 100 ? title.substring(0, 100) + '…' : title;
+                            return `<li><a href="${billUrl(b)}" target="_blank" rel="noopener noreferrer" class="hover:underline">${esc(BILL_LABELS[b.type] || b.type)} ${esc(b.number)}: ${esc(truncated)}</a> <span class="text-gray-400">(${esc(b.introducedDate?.substring(0, 4) || '')})</span></li>`;
+                        }).join('')}
+                    </ul>
+                </div>`;
+                billsDisplayed += toShow.length;
+            });
+            if (billsHtml) {
+                html += `<div class="mb-4">
+                    <h4 class="font-semibold text-gray-700 mb-1">Bills Sponsored <span class="text-xs font-normal text-gray-400">(${r.bills.total} total)</span></h4>
+                    ${billsHtml}
+                </div>`;
+            }
+
+            if (r.votes.length > 0) {
+                html += `<div>
+                    <h4 class="font-semibold text-gray-700 mb-2">Recent Votes <span class="text-xs font-normal text-gray-400">(✓ on winning side, ✗ on losing side)</span></h4>
+                    <ul class="space-y-2">
+                        ${r.votes.map(v => {
+                            const date = v.date ? new Date(v.date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '';
+                            const opt = v.cast || '—';
+                            const winLabel = v.withWinner != null ? (v.withWinner ? ' ✓' : ' ✗') : '';
+                            const optColor = (opt === 'Yea' || opt === 'Aye') ? 'text-green-700 bg-green-50'
+                                : (opt === 'Nay' || opt === 'No') ? 'text-red-700 bg-red-50'
+                                : 'text-gray-600 bg-gray-100';
+                            const question = v.question.length > 140 ? v.question.substring(0, 140) + '…' : v.question;
+                            return `
+                                <li class="border-b border-gray-100 last:border-b-0 pb-2 last:pb-0 flex gap-3 items-start">
+                                    <span class="text-xs text-gray-400 whitespace-nowrap mt-0.5 w-20 flex-shrink-0">${date}</span>
+                                    <span class="flex-1"><a href="${v.link}" target="_blank" rel="noopener noreferrer" class="text-gray-800 hover:underline">${esc(question)}</a> <span class="text-gray-400 text-xs">(${esc(v.result)} ${v.yeas}–${v.nays})</span></span>
+                                    <span class="text-xs font-semibold px-2 py-0.5 rounded ${optColor} whitespace-nowrap">${esc(opt)}${winLabel}</span>
+                                </li>
+                            `;
+                        }).join('')}
+                    </ul>
+                </div>`;
+            }
+            return html;
+        }
+
         function readAddress() {
             const street = document.getElementById('street').value.trim();
             const city = document.getElementById('city').value.trim();
@@ -207,10 +292,17 @@
                     </div>
                     <div class="record text-sm text-gray-600">
                         ${committeesHtml}
-                        <p class="text-gray-400 italic text-xs">Sponsored bills and recent votes are temporarily unavailable.</p>
+                        <div class="record-detail text-gray-500">Loading bills and votes…</div>
                     </div>
                 `;
                 container.appendChild(card);
+
+                const detail = card.querySelector('.record-detail');
+                fetchRecord(leg).then(r => {
+                    detail.innerHTML = renderRecord(r) || '<p class="text-gray-500 italic">No bills or votes found.</p>';
+                }).catch(() => {
+                    detail.innerHTML = '<p class="text-gray-500 italic">Could not load bills and votes.</p>';
+                });
             });
         }
 
